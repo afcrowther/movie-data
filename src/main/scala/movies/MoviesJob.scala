@@ -4,8 +4,7 @@ import movies.io.{Reader, Writer}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
 import scala.util.Try
@@ -43,35 +42,41 @@ object MoviesJob {
 
       // no longer needed
       persistedMovieRatings.unpersist()
-      val principalsInTop20Df = top20MoviesByRatings.join(dataFrames.principalsDf, 'movieId)
+      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, 'movieId)
         .select('principalId.as("personId"))
-        .groupBy('personId)
-        .agg(count('personId).as("credits"))
+      val principalsInTop20Df = aggregatePersonCredits(principalsJoinedDf, "principalCredits")
       // as we are exploding this dataframe (creating multiple rows from a single row in the input), it is worth us
       // joining on the top 20 movies before we do the explode function, to reduce the amount of data we shuffle later
       val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, 'movieId)
         .select('directors, 'writers)
         .persist(StorageLevel.MEMORY_AND_DISK)
 
-      val directorsInTop20Df = crewInTop20Df.select(splitStringUdf('directors).as("directors"))
-        .select(explode('directors).as("personId"))
-        .groupBy('personId)
-        .agg(count('personId).as("credits"))
-      val writersInTop20Df = crewInTop20Df.select('movieId, splitStringUdf('writers).as("writers"))
-        .select(explode('writers).as("personId"))
-        .groupBy('personId)
-        .agg(count('personId).as("credits"))
-
+      val directorsInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'directors, "directorCredits")
+      val writersInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'writers, "writerCredits")
       // assume every person id correlates with a name
       val creditsInTop20Movies = principalsInTop20Df
         .join(directorsInTop20Df, 'personId)
         .join(writersInTop20Df, 'personId)
-        .groupBy('personId)
-        .agg(sum('credits))
+        .select('personId, coalesce('principalCredits, 0L) + coalesce('directorCredits, 0L), coalesce('writerCredits, 0L).as('creditsInTop20Movies))
         .join(dataFrames.namesDf, 'personId)
-        .select('primaryName.as("name"), 'credits.as("credits_in_top_20_films"))
+        .select('primaryName.as("name"), 'creditsInTop20Movies)
+        .orderBy('creditsInTop20Movies.desc)
       writer.writeDataFrame(creditsInTop20Movies)
     }
+  }
+
+  def derivePersonCreditsCount(dataFrame: DataFrame, column: Column, aggregateColumnName: String): DataFrame = {
+    import dataFrame.sqlContext.implicits._
+    val exploded = dataFrame.select(splitStringUdf(column).as("tmp"))
+      .select(explode('tmp).as("personId"))
+      aggregatePersonCredits(exploded, aggregateColumnName)
+  }
+
+  def aggregatePersonCredits(dataFrame: DataFrame, aggregateColumnName: String): DataFrame = {
+    import dataFrame.sqlContext.implicits._
+    dataFrame
+      .groupBy('personId)
+      .agg(count('personId).as(aggregateColumnName))
   }
 
   def filterNonMovies(titlesDf: DataFrame, ratingsDf: DataFrame): DataFrame = {
@@ -80,7 +85,6 @@ object MoviesJob {
       .join(ratingsDf, 'titleId)
       .select('titleId, 'averageRating, 'numberOfVotes, 'primaryTitle)
   }
-
 
   /**
    * Will return the top twenty movies based on the ranking function:
