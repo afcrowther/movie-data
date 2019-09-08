@@ -11,7 +11,7 @@ spark-submit \
   --executor-cores 4 \
   --executor-memory 5g \
   --deploy-mode client \
-  /my/jar/location/movie-data-assembly-1.0.jar \
+  /my/jar/location/movie-data_2.11-1.0.0.jar \
     ratings/input/path.tsv \
     titles/input/path.tsv \
     crews/input/path.tsv \
