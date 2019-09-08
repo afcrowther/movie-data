@@ -1,70 +1,58 @@
 package movies
 
-import movies.Driver.InputFilePaths
-import movies.io.{Reader, Writer}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
-import scala.util.Try
-
 object MoviesJob {
 
   final case class InputDataFrames(ratingsDf: DataFrame, titlesDf: DataFrame, crewsDf: DataFrame,
                                    principalsDf: DataFrame, namesDf: DataFrame)
 
-  def runJob(inputFilePaths: InputFilePaths)(implicit sparkSession: SparkSession, reader: Reader, writer: Writer): Try[Unit] = {
+  def runJob(dataFrames: InputDataFrames)(implicit sparkSession: SparkSession): (DataFrame, DataFrame) = {
 
     import sparkSession.sqlContext.implicits._
+    // persist and repartition as using more than once
+    val persistedMovieRatings = filterNonMovies(dataFrames.titlesDf.repartition(200), dataFrames.ratingsDf)
+    // assumes that the ratings file is not empty
+    val averageNumberOfVotesBroadcast = sparkSession.sparkContext.broadcast(
+      persistedMovieRatings.select(avg('numberOfVotes).as("averageNumberOfVotes")).first().getDouble(0))
+    // persist as using multiple times going forward
+    val top20MoviesByRatings = deriveTop20MoviesOnRatingsRanking(persistedMovieRatings, averageNumberOfVotesBroadcast)
+      .persist(StorageLevel.MEMORY_AND_DISK)
 
-    val inputDataFrames = for {
-      ratingsDf    ← reader.readFileToDataFrame(inputFilePaths.ratingsFilePath, Schemas.ratingsSchema)
-      titlesDf     ← reader.readFileToDataFrame(inputFilePaths.titlesFilePath, Schemas.titlesSchema)
-      crewsDf      ← reader.readFileToDataFrame(inputFilePaths.crewsFilePath, Schemas.crewSchema)
-      principalsDf ← reader.readFileToDataFrame(inputFilePaths.principalFilePath, Schemas.principalsSchema)
-      namesDf      ← reader.readFileToDataFrame(inputFilePaths.namesFilePath, Schemas.namesSchema)
-    } yield InputDataFrames(ratingsDf, titlesDf, crewsDf, principalsDf, namesDf)
+    // no longer needed
+    persistedMovieRatings.unpersist()
 
-    inputDataFrames.flatMap { dataFrames ⇒
-      // persist and repartition as using more than once
-      val persistedMovieRatings = filterNonMovies(dataFrames.titlesDf.repartition(200), dataFrames.ratingsDf)
-      // assumes that the ratings file is not empty
-      val averageNumberOfVotesBroadcast = sparkSession.sparkContext.broadcast(
-        persistedMovieRatings.select(avg('numberOfVotes).as("averageNumberOfVotes")).first().getDouble(0))
-      // persist as using multiple times going forward
-      val top20MoviesByRatings = deriveTop20MoviesOnRatingsRanking(persistedMovieRatings, averageNumberOfVotesBroadcast)
-        .persist(StorageLevel.MEMORY_AND_DISK)
+    val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, "titleId")
+      .select('principalId.as("personId"))
+    val principalsInTop20Df = aggregatePersonCredits(principalsJoinedDf, "principalCredits")
+    // as we are exploding this dataframe (creating multiple rows from a single row in the input), it is worth us
+    // joining on the top 20 movies before we do the explode function, to reduce the amount of data we shuffle later
+    val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, "titleId")
+      .select('directorIds, 'writerIds)
+      .persist(StorageLevel.MEMORY_AND_DISK)
 
-      // write top 20 movies
-      writer.writeDataFrame(top20MoviesByRatings)
+    val directorsInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'directorIds, "directorCredits")
+    val writersInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'writerIds, "writerCredits")
+    // assume every person id correlates with a name
+    val creditsInTop20Movies = principalsInTop20Df
+      .join(directorsInTop20Df, Seq("personId"), "outer")
+      .join(writersInTop20Df, Seq("personId"), "outer")
+      .select(
+        'personId,
+        (coalesce('principalCredits, lit(0L)) + coalesce('directorCredits, lit(0L)) + coalesce('writerCredits, lit(0L))).as('totalCredits),
+        coalesce('directorCredits, lit(0L)).as("directorCredits"),
+        coalesce('writerCredits, lit(0L)).as("writerCredits"),
+        coalesce('principalCredits, lit(0L)).as("principalCredits"))
+      .join(dataFrames.namesDf, "personId")
+      .select('primaryName.as("name"), 'totalCredits, 'directorCredits, 'writerCredits, 'principalCredits)
+      // keep deterministic for testing, secondary order on name
+      .orderBy('totalCredits.desc, 'primaryName)
 
-      // no longer needed
-      persistedMovieRatings.unpersist()
-
-      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, "titleId")
-        .select('principalId.as("personId"))
-      val principalsInTop20Df = aggregatePersonCredits(principalsJoinedDf, "principalCredits")
-      // as we are exploding this dataframe (creating multiple rows from a single row in the input), it is worth us
-      // joining on the top 20 movies before we do the explode function, to reduce the amount of data we shuffle later
-      val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, "titleId")
-        .select('directorIds, 'writerIds)
-        .persist(StorageLevel.MEMORY_AND_DISK)
-
-      val directorsInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'directorIds, "directorCredits")
-      val writersInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'writerIds, "writerCredits")
-      // assume every person id correlates with a name
-      val creditsInTop20Movies = principalsInTop20Df
-        .join(directorsInTop20Df, "personId")
-        .join(writersInTop20Df, "personId")
-        .select('personId, coalesce('principalCredits, lit(0L)) + coalesce('directorCredits, lit(0L)), coalesce('writerCredits, lit(0L)).as('creditsInTop20Movies))
-        .join(dataFrames.namesDf, "personId")
-        .select('primaryName.as("name"), 'creditsInTop20Movies)
-        .orderBy('creditsInTop20Movies.desc)
-
-      writer.writeDataFrame(creditsInTop20Movies)
-    }
+    (top20MoviesByRatings, creditsInTop20Movies)
   }
 
   def derivePersonCreditsCount(dataFrame: DataFrame, column: Column, aggregateColumnName: String): DataFrame = {
