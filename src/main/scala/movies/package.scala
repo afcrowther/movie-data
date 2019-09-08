@@ -23,13 +23,13 @@ package object movies {
     ))
 
     val crewSchema = StructType(Array(
-      StructField("movieId", StringType),
+      StructField("titleId", StringType),
       StructField("directorIds", ArrayType(StringType)),
       StructField("writerIds", ArrayType(StringType))
     ))
 
     val principalsSchema = StructType(Array(
-      StructField("movieId", StringType),
+      StructField("titleId", StringType),
       StructField("ordering", IntegerType),
       StructField("principalId", StringType),
       StructField("category", StringType),

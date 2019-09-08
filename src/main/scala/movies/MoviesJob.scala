@@ -1,5 +1,6 @@
 package movies
 
+import movies.Driver.InputFilePaths
 import movies.io.{Reader, Writer}
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.expressions.Window
@@ -14,18 +15,16 @@ object MoviesJob {
   final case class InputDataFrames(ratingsDf: DataFrame, titlesDf: DataFrame, crewsDf: DataFrame,
                                    principalsDf: DataFrame, namesDf: DataFrame)
 
-  def runJob(ratingsFileLocation: String, titlesFileLocation: String, crewsFileLocation: String,
-             principalsFileLocation: String, namesFileLocation: String)
-            (implicit sparkSession: SparkSession, reader: Reader, writer: Writer): Try[Unit] = {
+  def runJob(inputFilePaths: InputFilePaths)(implicit sparkSession: SparkSession, reader: Reader, writer: Writer): Try[Unit] = {
 
     import sparkSession.sqlContext.implicits._
 
     val inputDataFrames = for {
-      ratingsDf    ← reader.readFileToDataFrame(ratingsFileLocation, Schemas.ratingsSchema)
-      titlesDf     ← reader.readFileToDataFrame(titlesFileLocation, Schemas.titlesSchema)
-      crewsDf      ← reader.readFileToDataFrame(crewsFileLocation, Schemas.crewSchema)
-      principalsDf ← reader.readFileToDataFrame(principalsFileLocation, Schemas.principalsSchema)
-      namesDf      ← reader.readFileToDataFrame(namesFileLocation, Schemas.namesSchema)
+      ratingsDf    ← reader.readFileToDataFrame(inputFilePaths.ratingsFilePath, Schemas.ratingsSchema)
+      titlesDf     ← reader.readFileToDataFrame(inputFilePaths.titlesFilePath, Schemas.titlesSchema)
+      crewsDf      ← reader.readFileToDataFrame(inputFilePaths.crewsFilePath, Schemas.crewSchema)
+      principalsDf ← reader.readFileToDataFrame(inputFilePaths.principalFilePath, Schemas.principalsSchema)
+      namesDf      ← reader.readFileToDataFrame(inputFilePaths.namesFilePath, Schemas.namesSchema)
     } yield InputDataFrames(ratingsDf, titlesDf, crewsDf, principalsDf, namesDf)
 
     inputDataFrames.flatMap { dataFrames ⇒
@@ -42,12 +41,12 @@ object MoviesJob {
 
       // no longer needed
       persistedMovieRatings.unpersist()
-      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, 'movieId)
+      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, 'titleId)
         .select('principalId.as("personId"))
       val principalsInTop20Df = aggregatePersonCredits(principalsJoinedDf, "principalCredits")
       // as we are exploding this dataframe (creating multiple rows from a single row in the input), it is worth us
       // joining on the top 20 movies before we do the explode function, to reduce the amount of data we shuffle later
-      val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, 'movieId)
+      val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, 'titleId)
         .select('directors, 'writers)
         .persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -57,10 +56,11 @@ object MoviesJob {
       val creditsInTop20Movies = principalsInTop20Df
         .join(directorsInTop20Df, 'personId)
         .join(writersInTop20Df, 'personId)
-        .select('personId, coalesce('principalCredits, 0L) + coalesce('directorCredits, 0L), coalesce('writerCredits, 0L).as('creditsInTop20Movies))
+        .select('personId, coalesce('principalCredits, lit(0L)) + coalesce('directorCredits, lit(0L)), coalesce('writerCredits, lit(0L)).as('creditsInTop20Movies))
         .join(dataFrames.namesDf, 'personId)
         .select('primaryName.as("name"), 'creditsInTop20Movies)
         .orderBy('creditsInTop20Movies.desc)
+
       writer.writeDataFrame(creditsInTop20Movies)
     }
   }
@@ -96,7 +96,7 @@ object MoviesJob {
     import ratingsDf.sqlContext.implicits._
 
     // add tie-breaker of numberOfVotes and movieId on ordering so that we remain deterministic (title id assumed to be unique)
-    val window = Window.orderBy('rankingValue.desc, 'numberOfVotes.desc, 'movieId)
+    val window = Window.orderBy('rankingValue.desc, 'numberOfVotes.desc, 'titleId)
 
     // filter number of votes first to avoid aggregating unnecessary data
     ratingsDf.filter('numberOfVotes >= 50)
@@ -106,11 +106,11 @@ object MoviesJob {
       .withColumn("rank", row_number.over(window))
   }
 
-  // need some custom logic to handle the '\\N
+  // need some custom logic to handle the '\\N'
   val splitStringUdf = udf { string: String => stringToList(string) }
 
   // could be better
-  def stringToList(string: String): List[String] = string match {
+  @inline def stringToList(string: String): List[String] = string match {
     case "" ⇒ Nil
     case "\\N" ⇒ Nil
       // assumes the input string is in the "a,b,c" pattern

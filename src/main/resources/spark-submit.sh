@@ -12,5 +12,10 @@ spark-submit \
   --executor-memory 5g \
   --deploy-mode client \
   /my/jar/location/movie-data-assembly-1.0.jar \
-    movies/input/path.tsv
+    ratings/input/path.tsv \
+    titles/input/path.tsv \
+    crews/input/path.tsv \
+    principals/input.path.tsv \
+    name/input/path.tsv
+
 
