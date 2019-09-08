@@ -89,8 +89,6 @@ object MoviesJobSpec extends MockitoSugar {
       NamesInput("director3", "third director", "", "", "", "")
     )
   }
-
-
 }
 
 class MoviesJobSpec extends FlatSpec with Matchers with MockitoSugar {
@@ -103,7 +101,7 @@ class MoviesJobSpec extends FlatSpec with Matchers with MockitoSugar {
     when(mockReader.readFileToDataFrame(mockEq(ratingsFileLocation), mockEq(Schemas.ratingsSchema))(mockEq(session))).thenReturn(Success(ratingsDf))
     when(mockReader.readFileToDataFrame(mockEq(titlesFileLocation), mockEq(Schemas.titlesSchema))(mockEq(session))).thenReturn(Success(titlesDf))
     when(mockReader.readFileToDataFrame(mockEq(crewsFileLocation), mockEq(Schemas.crewSchema))(mockEq(session))).thenReturn(Success(crewsDf))
-    when(mockReader.readFileToDataFrame(mockEq(principalsFileLocation), mockEq(Schemas.principalsSchema))(mockEq(session))).thenReturn(Success(ratingsDf))
+    when(mockReader.readFileToDataFrame(mockEq(principalsFileLocation), mockEq(Schemas.principalsSchema))(mockEq(session))).thenReturn(Success(principalsDf))
     when(mockReader.readFileToDataFrame(mockEq(namesFileLocation), mockEq(Schemas.namesSchema))(mockEq(session))).thenReturn(Success(namesDf))
     when(mockWriter.writeDataFrame(any[DataFrame])).thenReturn(Success())
 

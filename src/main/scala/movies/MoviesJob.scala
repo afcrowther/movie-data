@@ -36,28 +36,30 @@ object MoviesJob {
       // persist as using multiple times going forward
       val top20MoviesByRatings = deriveTop20MoviesOnRatingsRanking(persistedMovieRatings, averageNumberOfVotesBroadcast)
         .persist(StorageLevel.MEMORY_AND_DISK)
+
       // write top 20 movies
       writer.writeDataFrame(top20MoviesByRatings)
 
       // no longer needed
       persistedMovieRatings.unpersist()
-      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, 'titleId)
+
+      val principalsJoinedDf = top20MoviesByRatings.join(dataFrames.principalsDf, "titleId")
         .select('principalId.as("personId"))
       val principalsInTop20Df = aggregatePersonCredits(principalsJoinedDf, "principalCredits")
       // as we are exploding this dataframe (creating multiple rows from a single row in the input), it is worth us
       // joining on the top 20 movies before we do the explode function, to reduce the amount of data we shuffle later
-      val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, 'titleId)
-        .select('directors, 'writers)
+      val crewInTop20Df = top20MoviesByRatings.join(dataFrames.crewsDf, "titleId")
+        .select('directorIds, 'writerIds)
         .persist(StorageLevel.MEMORY_AND_DISK)
 
-      val directorsInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'directors, "directorCredits")
-      val writersInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'writers, "writerCredits")
+      val directorsInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'directorIds, "directorCredits")
+      val writersInTop20Df = derivePersonCreditsCount(crewInTop20Df, 'writerIds, "writerCredits")
       // assume every person id correlates with a name
       val creditsInTop20Movies = principalsInTop20Df
-        .join(directorsInTop20Df, 'personId)
-        .join(writersInTop20Df, 'personId)
+        .join(directorsInTop20Df, "personId")
+        .join(writersInTop20Df, "personId")
         .select('personId, coalesce('principalCredits, lit(0L)) + coalesce('directorCredits, lit(0L)), coalesce('writerCredits, lit(0L)).as('creditsInTop20Movies))
-        .join(dataFrames.namesDf, 'personId)
+        .join(dataFrames.namesDf, "personId")
         .select('primaryName.as("name"), 'creditsInTop20Movies)
         .orderBy('creditsInTop20Movies.desc)
 
@@ -82,7 +84,7 @@ object MoviesJob {
   def filterNonMovies(titlesDf: DataFrame, ratingsDf: DataFrame): DataFrame = {
     import ratingsDf.sqlContext.implicits._
     titlesDf.filter('titleType === "movie")
-      .join(ratingsDf, 'titleId)
+      .join(ratingsDf, "titleId")
       .select('titleId, 'averageRating, 'numberOfVotes, 'primaryTitle)
   }
 
